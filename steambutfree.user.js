@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SteamButFree
 // @namespace    http://tampermonkey.net/
-// @version      1.3
-// @description  Simple Script to get downloads to steam
+// @version      1.4
+// @description  Simple Script to get downloads to steam with time display
 // @author       krachDev
 // @match        https://store.steampowered.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -16,7 +16,6 @@ const pathParts = window.location.pathname.split('/');
 const rawTitle = pathParts[3] || "";
 const targetGame = decodeURIComponent(rawTitle.replace(/_/g, ' ')).trim();
 
-
     console.log(`[Repack Helper] Target game detected: "${targetGame}"`);
 
     const finalGameTitle = targetGame;
@@ -28,15 +27,73 @@ const targetGame = decodeURIComponent(rawTitle.replace(/_/g, ' ')).trim();
 
     function normalizeTitle(str) {
         console.log(str);
-        return str?.toLowerCase().replace(/’/g, "'") ?? "";
+        return str?.toLowerCase().replace(/'/g, "'") ?? "";
     }
-   function getViableMatches(gameTitle) {
+
+    // New function to get time information from download page
+function getTimeInfo(gamePageUrl) {
+    console.log(`[Repack Helper] Getting time info from: ${gamePageUrl}`);
+    return new Promise((resolve) => {
+        GM_xmlhttpRequest({
+            method: "GET",
+            url: gamePageUrl,
+            onload: function(response) {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(response.responseText, "text/html");
+
+                // Evaluate XPath for PublishELemn in the fetched doc
+                const xpathResult = doc.evaluate(
+                    '//*[@id="post-141517"]/div[4]/h3[2]',
+                    doc,
+                    null,
+                    XPathResult.FIRST_ORDERED_NODE_TYPE,
+                    null
+                );
+                const publishElem = xpathResult.singleNodeValue;
+
+                if (publishElem && publishElem.textContent.trim().length > 0) {
+                    const publishText = publishElem.textContent.trim();
+                    console.log(`[Repack Helper] Using publishElem text: "${publishText}"`);
+                    resolve(publishText);
+                    return;
+                }
+
+                // If no publishElem text, try the time selectors
+                const timeSelectors = [
+                    'body > div.wrap-fullwidth > div.single-content > div.entry-top > div.time-article.updated',
+                    '.time-article.updated',
+                    '.time-article'
+                ];
+
+                let timeText = 'Unknown time';
+
+                for (const selector of timeSelectors) {
+                    const timeElement = doc.querySelector(selector);
+                    if (timeElement) {
+                        const anchorTag = timeElement.querySelector('a');
+                        timeText = anchorTag ? anchorTag.textContent.trim() : timeElement.textContent.trim();
+                        console.log(`[Repack Helper] Found time: "${timeText}" using selector: ${selector}`);
+                        break;
+                    }
+                }
+
+                resolve(timeText);
+            },
+            onerror: function() {
+                console.warn(`[Repack Helper] Failed to get time info from: ${gamePageUrl}`);
+                resolve('Time unavailable');
+            }
+        });
+    });
+}
+
+   async function getViableMatches(gameTitle) {
     console.log(`[Repack Helper] Searching for "${gameTitle}" on repack-games.com...`);
     return new Promise((resolve) => {
         GM_xmlhttpRequest({
             method: "GET",
             url: `https://repack-games.com/?s=${encodeURIComponent(gameTitle)}`,
-            onload: function(response) {
+            onload: async function(response) {
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(response.responseText, "text/html");
                 const items = doc.querySelectorAll('ul.modern-articles.clean > li');
@@ -46,34 +103,36 @@ const targetGame = decodeURIComponent(rawTitle.replace(/_/g, ' ')).trim();
                 const viableMatches = [];
                 const minSimilarity = 0.2;
 
-                items.forEach(li => {
+                // Process items sequentially to avoid overwhelming the server
+                for (const li of items) {
                     const title = li.querySelector('div.content-list > a > h2')?.textContent.trim();
                     const href = li.querySelector('div.content-list > a')?.href;
 
                     if (title && href) {
                         // Check if the search term is present in the title (case-insensitive)
-
-
-if (!normalizeTitle(title).includes(normalizeTitle(gameTitle))) {
-  console.log(`[Repack Helper] Skipped: "${title}" — doesn't contain search term.`);
-  return;
-}
-
+                        if (!normalizeTitle(title).includes(normalizeTitle(gameTitle))) {
+                            console.log(`[Repack Helper] Skipped: "${title}" — doesn't contain search term.`);
+                            continue;
+                        }
 
                         const similarity = calculateSimilarity(gameTitle, title);
                         console.log(`[Repack Helper] Checking match: "${title}" (similarity: ${similarity.toFixed(2)})`);
 
                         if (similarity >= minSimilarity) {
+                            // Get time information for each viable match
+                            const timeInfo = await getTimeInfo(href);
+
                             viableMatches.push({
                                 title,
                                 href,
                                 similarity,
-                                displayTitle: formatDisplayTitle(title, similarity)
+                                timeInfo,
+                                displayTitle: formatDisplayTitle(title, similarity, timeInfo)
                             });
-                            console.log(`[Repack Helper] Added viable match: "${title}"`);
+                            console.log(`[Repack Helper] Added viable match: "${title}" - ${timeInfo}`);
                         }
                     }
-                });
+                }
 
                 // Sort by similarity
                 viableMatches.sort((a, b) => b.similarity - a.similarity);
@@ -84,11 +143,10 @@ if (!normalizeTitle(title).includes(normalizeTitle(gameTitle))) {
     });
 }
 
-
-    function formatDisplayTitle(title, similarity) {
-        // Add similarity score and clean up title for display
+    function formatDisplayTitle(title, similarity, timeInfo) {
+        // Add similarity score, time info, and clean up title for display
         const score = Math.round(similarity * 100);
-        return `[${score}%] ${title}`;
+        return `[${score}%] ${title} (${timeInfo})`;
     }
 
     function calculateSimilarity(a, b) {
@@ -137,17 +195,28 @@ if (!normalizeTitle(title).includes(normalizeTitle(gameTitle))) {
 
 async function createDownloadUI() {
     console.log('[Repack Helper] Initializing download UI...');
-    const viableMatches = await getViableMatches(targetGame);
-    const viableMatches2 = null;
 
-    if (!viableMatches.length) {
-       alert('No matching games found on repack-games.com');
-        return;
-    }
-
+    // Show loading message while fetching matches
     const purchaseSection = document.querySelector('.game_area_purchase');
     if (!purchaseSection) {
         console.warn('[Repack Helper] Could not find purchase section on page.');
+        return;
+    }
+
+    // Create temporary loading message
+    const loadingContainer = document.createElement('div');
+    loadingContainer.className = 'game_purchase_action';
+    loadingContainer.style.cssText = 'margin-top: 15px; text-align: center; padding: 20px; background-color: #3d4450; color: #c6d4df; border-radius: 3px;';
+    loadingContainer.textContent = 'Searching for game matches and loading time information...';
+    purchaseSection.appendChild(loadingContainer);
+
+    const viableMatches = await getViableMatches(targetGame);
+
+    // Remove loading message
+    purchaseSection.removeChild(loadingContainer);
+
+    if (!viableMatches.length) {
+       alert('No matching games found on repack-games.com');
         return;
     }
 
@@ -168,7 +237,7 @@ async function createDownloadUI() {
     title.style.marginBottom = '10px';
     title.style.fontWeight = 'bold';
     title.style.color = '#b8b6b4';
-    title.textContent = `${viableMatches.length} matches:`;
+    title.textContent = `${viableMatches.length} matches found:`;
 
     const gameSelect = document.createElement('select');
     gameSelect.style.cssText = 'margin-bottom: 10px; width: 80%; padding: 8px; background-color: #3d4450; color: #c6d4df; border: 1px solid #495562; border-radius: 3px';
@@ -274,6 +343,35 @@ async function createDownloadUI() {
         }
     };
 
+const jdAllButton = document.createElement('a');
+jdAllButton.className = 'btn_green_steamui btn_medium';
+jdAllButton.target = '_blank';
+jdAllButton.style.marginLeft = '10px';
+jdAllButton.innerHTML = '<span>Send All to JDownloader</span>';
+
+jdAllButton.onclick = (e) => {
+    e.preventDefault();
+    if (!downloadSelect.options.length) {
+        alert("No download links to send.");
+        return;
+    }
+
+    const selectedOption = gameSelect.options[gameSelect.selectedIndex];
+    const packageName = selectedOption ? selectedOption.textContent : "Repack Game";
+
+    // Gather all URLs from the downloadSelect options
+    const allLinks = Array.from(downloadSelect.options).map(opt => opt.value).join('\n');
+
+    const baseUrl = "http://127.0.0.1:3128/linkcollector/addLinksAndStartDownload?";
+    const linksParam = "links=" + encodeURIComponent(allLinks);
+    const packageParam = "&packageName=" + encodeURIComponent(packageName);
+    const extraParams = "&extractPassword=&downloadPassword=";
+
+    const fullLink = baseUrl + linksParam + packageParam + extraParams;
+    window.open(fullLink, '_blank');
+};
+
+// Append the new button next to existing buttons
     actionBg.appendChild(title);
     actionBg.appendChild(gameSelect);
     actionBg.appendChild(loadingDiv);
@@ -287,10 +385,10 @@ async function createDownloadUI() {
     Array.from(purchaseSection.children).forEach(child => {
         child.style.marginBottom = '40px';
     });
+buttonDiv.appendChild(jdAllButton);
 
     console.log('[Repack Helper] UI inserted and old content wiped.');
 }
 createDownloadUI();
-
 
 })();
